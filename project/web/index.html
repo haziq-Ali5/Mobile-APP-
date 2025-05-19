@@ -31,8 +31,22 @@
 
   <title>project</title>
   <link rel="manifest" href="manifest.json">
+  <script src="https://cdn.socket.io/4.5.0/socket.io.min.js"></script>
+  <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app.js"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth.js"></script>
+<script src="sqflite_sw.js" defer></script>
 </head>
 <body>
+  <script>
+    // Initialize socket.io connection
+    const socket = io('http://localhost:5000', {
+      transports: ['websocket'],
+      upgrade: false
+    });
+  </script>
   <script src="flutter_bootstrap.js" async></script>
+  <script>
+  window.Promise = Promise; // Polyfill for PromiseJsImpl
+</script>
 </body>
 </html>

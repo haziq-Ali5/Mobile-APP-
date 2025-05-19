@@ -1,123 +1,117 @@
 import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
+import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:project/services/storage_service.dart';
+import 'package:uuid/uuid.dart';
+import 'package:http_parser/http_parser.dart';
 
 class ApiService {
-  final StorageService _storageService;
-  
+  // Base URL for the API
   // Use 10.0.2.2 for Android emulator to connect to localhost
-  static const String _baseUrl = 'http://10.0.2.2:5000';
+  final String baseUrl = 'http://localhost:5000';
   
-  ApiService(this._storageService);
+  // API endpoints
+  final String uploadEndpoint = '/jobs';
+  final String statusEndpoint = '/status';
+  final String resultEndpoint = '/result';
+  
+  // Upload image files
+  Future<List<String>> uploadFiles(List<Uint8List> files) async {
+    try {
+      final request = http.MultipartRequest('POST', Uri.parse('$baseUrl$uploadEndpoint'));
 
-  // Upload an image file from device
-  Future<String> uploadImage(File image) async {
-    final token = await _storageService.getToken();
-    if (token == null) {
-      throw Exception('Authentication token not found');
-    }
-    
-    final request = http.MultipartRequest('POST', Uri.parse('$_baseUrl/jobs'));
-    
-    // Add auth header
-    request.headers['Authorization'] = 'Bearer $token';
-    
-    // Add the file
-    request.files.add(await http.MultipartFile.fromPath('images', image.path));
-    
-    // Send the request
-    final response = await request.send();
-    
-    // Parse the response
-    if (response.statusCode == 200) {
-      final jsonResponse = jsonDecode(await response.stream.bytesToString());
-      
-      // Handle array response (multiple jobs)
-      if (jsonResponse is List) {
-        return jsonResponse[0]['job_id'] as String;
+      for (var i = 0; i < files.length; i++) {
+        request.files.add(
+          http.MultipartFile.fromBytes(
+            'images',
+            files[i],
+            filename: 'image_${DateTime.now().millisecondsSinceEpoch}_$i.jpg',
+            contentType: MediaType('image', 'jpeg'),
+          )
+        );
       }
+
+      final response = await http.Response.fromStream(await request.send());
       
-      // Handle single job response
-      return jsonResponse['job_id'] as String;
-    } else {
-      final errorBody = await response.stream.bytesToString();
-      throw Exception('Upload failed: ${response.statusCode} - $errorBody');
+      if (response.statusCode == 200) {
+        final List<dynamic> responseData = json.decode(response.body);
+        return responseData.map<String>((j) => j['job_id'].toString()).toList();
+      } else {
+        throw Exception('Upload failed: ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('Upload error: $e');
+      rethrow;
     }
   }
-  
-  // Upload image bytes (for web or when already in memory)
-  Future<String> uploadImageBytes(Uint8List imageBytes) async {
-    final token = await _storageService.getToken();
-    if (token == null) {
-      throw Exception('Authentication token not found');
-    }
-    
-    final request = http.MultipartRequest('POST', Uri.parse('$_baseUrl/jobs'));
-    
-    // Add auth header
-    request.headers['Authorization'] = 'Bearer $token';
-    
-    // Add the image bytes as a file
-    request.files.add(http.MultipartFile.fromBytes(
-      'images', 
-      imageBytes,
-      filename: 'image.jpg',
-    ));
-    
-    // Send the request
-    final response = await request.send();
-    
-    // Parse the response
-    if (response.statusCode == 200) {
-      final jsonResponse = jsonDecode(await response.stream.bytesToString());
-      
-      // Handle array response (multiple jobs)
-      if (jsonResponse is List) {
-        return jsonResponse[0]['job_id'] as String;
-      }
-      
-      // Handle single job response
-      return jsonResponse['job_id'] as String;
-    } else {
-      final errorBody = await response.stream.bytesToString();
-      throw Exception('Upload failed: ${response.statusCode} - $errorBody');
-    }
-  }
+
+  // Deprecated single-image methods
+  Future<String> uploadImage(File image) async => 
+      (await uploadFiles([await image.readAsBytes()])).first;
+
+  Future<String> uploadImageBytes(Uint8List bytes) async => 
+      (await uploadFiles([bytes])).first;
 
   // Check job status
   Future<String> checkJobStatus(String jobId) async {
-    final url = Uri.parse('$_baseUrl/status/$jobId');
-    final token = await _storageService.getToken();
-    
-    final response = await http.get(
-      url,
-      headers: token != null ? {'Authorization': 'Bearer $token'} : {},
-    );
-    
-    if (response.statusCode == 200) {
-      final jsonResponse = jsonDecode(response.body);
-      return jsonResponse['status'];
-    } else {
-      throw Exception('Failed to check job status: ${response.statusCode}');
+    try {
+      final response = await http.get(Uri.parse('$baseUrl$statusEndpoint/$jobId'));
+      
+      if (response.statusCode == 200) {
+        final responseData = json.decode(response.body);
+        return responseData['status'];
+      } else {
+        throw Exception('Failed to check job status: ${response.statusCode} ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('Error checking job status: $e');
+      throw Exception('Failed to check job status: $e');
     }
   }
-  
-  // Get enhanced image
-  Future<Uint8List> getEnhancedImage(String jobId) async {
-    final url = Uri.parse('$_baseUrl/result/$jobId');
-    final token = await _storageService.getToken();
-    
-    final response = await http.get(
-      url,
-      headers: token != null ? {'Authorization': 'Bearer $token'} : {},
-    );
-    
-    if (response.statusCode == 200) {
-      return response.bodyBytes;
-    } else {
-      throw Exception('Failed to get enhanced image: ${response.statusCode}');
+
+  // Get all enhanced images for a job (renamed to match what you're calling)
+  Future<List<Uint8List>> getEnhancedImages(String jobId) async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl$resultEndpoint/$jobId/all'));
+
+      if (response.statusCode == 200) {
+        final List<dynamic> jsonList = json.decode(response.body);
+        return jsonList.map<Uint8List>((base64Str) => base64Decode(base64Str)).toList();
+      } else {
+        throw Exception('Failed to get enhanced images: ${response.statusCode} ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('Error getting enhanced images: $e');
+      throw Exception('Failed to get enhanced images: $e');
     }
+  }
+
+  // Get a single enhanced image (optional, for legacy calls)
+  Future<Uint8List> getEnhancedImage(String jobId) async {
+    try {
+      final response = await http.get(Uri.parse('$baseUrl$resultEndpoint/$jobId'));
+
+      if (response.statusCode == 200) {
+        return response.bodyBytes;
+      } else {
+        throw Exception('Failed to get enhanced image: ${response.statusCode} ${response.body}');
+      }
+    } catch (e) {
+      debugPrint('Error getting enhanced image: $e');
+      throw Exception('Failed to get enhanced image: $e');
+    }
+  }
+
+  // Generate fake job ID (for testing)
+  String generateFakeJobId() {
+    const uuid = Uuid();
+    return uuid.v4();
+  }
+
+  // Simulate job completion
+  Future<void> simulateJobCompletion(String jobId) async {
+    await Future.delayed(const Duration(seconds: 3));
+    return;
   }
 }

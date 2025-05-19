@@ -4,8 +4,9 @@ import 'package:project/providers/auth_provider.dart';
 import 'package:project/widgets/custom.dart';
 
 class RegisterScreen extends StatefulWidget {
+  const RegisterScreen({super.key});
   @override
-  _RegisterScreenState createState() => _RegisterScreenState();
+  State<RegisterScreen> createState() => _RegisterScreenState();
 }
 
 class _RegisterScreenState extends State<RegisterScreen> {
@@ -101,13 +102,13 @@ class _RegisterScreenState extends State<RegisterScreen> {
                                   _emailController.text.trim(),
                                   _passwordController.text.trim(),
                                 );
-
+                               
                                 ScaffoldMessenger.of(context).showSnackBar(
                                   const SnackBar(
                                     content: Text('Registration successful! Please log in.'),
                                   ),
                                 );
-
+                                
 
                                 Navigator.pushReplacementNamed(context, '/login',arguments: {'showSuccess': true},);
                               } catch (e) {

@@ -3,6 +3,7 @@ import 'package:project/providers/job_provider.dart';
 import 'package:provider/provider.dart';
 import 'package:project/constants/enums.dart';
 class StatusIndicator extends StatelessWidget {
+  const StatusIndicator({super.key});
   @override
   Widget build(BuildContext context) {
     final jobProvider = Provider.of<JobProvider>(context);

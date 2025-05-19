@@ -1,159 +1,305 @@
-import 'dart:io';
+import 'package:uuid/uuid.dart';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/widgets.dart';
 import 'package:project/constants/enums.dart';
 import 'package:project/models/job.dart';
 import 'package:project/services/api_service.dart';
+import 'package:project/services/database_helper.dart';
 import 'package:web_socket_channel/web_socket_channel.dart';
+import 'dart:convert';
+import 'package:web_socket_channel/io.dart';
 
 class JobProvider with ChangeNotifier {
   final ApiService _apiService;
+  final DatabaseHelper _databaseHelper = DatabaseHelper();
+  final Uuid _uuid = Uuid();
   JobStatus _status = JobStatus.idle;
   final List<ProcessingJob> _jobs = [];
   WebSocketChannel? _channel;
   String? _latestJobId;
-  
+  static const String baseUrl = 'http://localhost:5000';
+  final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
+
+  String? _currentBatchId;
+  final Map<String, List<String>> _batches = {}; // batchId -> List<jobId>
+
   JobProvider(this._apiService);
-  
+
   JobStatus get status => _status;
   List<ProcessingJob> get jobs => List.unmodifiable(_jobs);
   String? get latestJobId => _latestJobId;
-  
-  // Upload a file from device
-  Future<void> uploadImage(File image) async {
+  String? get currentBatchId => _currentBatchId;
+  Map<String, List<String>> get batches => Map.unmodifiable(_batches);
+
+  void startNewBatch() {
+    _currentBatchId = _uuid.v4();
+    _batches[_currentBatchId!] = [];
+  }
+
+  double getBatchProgress(String batchId) {
+    final jobs = _jobs.where((j) => j.batchId == batchId).toList();
+    if (jobs.isEmpty) return 0.0;
+    final completedCount = jobs.where((j) => j.status == JobStatus.completed).length;
+    return completedCount / jobs.length;
+  }
+
+  Future<void> loadJobs() async {
     try {
-      _status = JobStatus.uploading;
+      final savedJobs = await _databaseHelper.getAllJobs();
+      _jobs
+        ..clear()
+        ..addAll(savedJobs);
       notifyListeners();
-      
-      final jobId = await _apiService.uploadImage(image);
-      _processJob(jobId);
     } catch (e) {
-      _status = JobStatus.failed;
-      notifyListeners();
-      rethrow;
+      debugPrint('Error loading jobs: $e');
     }
   }
-  
-  // Upload image bytes (for web or when image is already in memory)
+
+  /// Upload multiple files in a batch.
+  Future<List<String>> uploadFiles(List<Uint8List> files) async {
+  try {
+    _status = JobStatus.uploading;
+    notifyListeners();
+
+    startNewBatch();  // Always start a new batch
+
+    // API call returns list of job IDs for the batch
+    final jobIds = await _apiService.uploadFiles(files);
+    debugPrint('Uploaded files, received job IDs: $jobIds');
+    _batches[_currentBatchId!] = jobIds;
+
+    for (final jobId in jobIds) {
+      final job = ProcessingJob(
+        jobId: jobId,
+        status: JobStatus.processing,
+        createdAt: DateTime.now(),
+        batchId: _currentBatchId,
+      );
+      await _databaseHelper.saveJob(job);
+      _jobs.add(job);
+      _processJob(jobId);
+    }
+
+    _status = JobStatus.processing;
+    notifyListeners();
+
+    // Return the first jobId in the list (assuming there is at least one)
+    if (jobIds.isNotEmpty) {
+      return jobIds;
+    } else {
+      throw Exception('No job IDs returned from upload');
+    }
+  } catch (e) {
+    _status = JobStatus.failed;
+    notifyListeners();
+    rethrow;
+  }
+}
+
+
+  /// Upload a single image (if needed)
   Future<void> uploadImageBytes(Uint8List imageBytes) async {
     try {
       _status = JobStatus.uploading;
       notifyListeners();
-      
+
+      startNewBatch();
       final jobId = await _apiService.uploadImageBytes(imageBytes);
+
+      final job = ProcessingJob(
+        jobId: jobId,
+        status: JobStatus.processing,
+        createdAt: DateTime.now(),
+        batchId: _currentBatchId,
+      );
+      await _databaseHelper.saveJob(job);
+      _jobs.add(job);
+
       _processJob(jobId);
+
+      _status = JobStatus.processing;
+      notifyListeners();
     } catch (e) {
       _status = JobStatus.failed;
       notifyListeners();
       rethrow;
     }
   }
-  
-  // Common processing logic for both upload methods
+
+  Future<void> retryJob(ProcessingJob job) async {
+    try {
+      final jobIndex = _jobs.indexWhere((j) => j.jobId == job.jobId);
+      final newJob = ProcessingJob(
+        jobId: job.jobId,
+        status: JobStatus.processing,
+        createdAt: job.createdAt,
+        batchId: job.batchId,
+      );
+
+      if (jobIndex >= 0) {
+        _jobs[jobIndex] = newJob;
+      } else {
+        _jobs.add(newJob);
+      }
+
+      await _databaseHelper.updateJobStatus(job.jobId, JobStatus.processing);
+
+      // Keep tracking this as latest if it's most recent
+      _latestJobId = job.jobId;
+      _status = JobStatus.processing;
+
+      notifyListeners();
+      _connectToWebSocket(job.jobId);
+    } catch (e) {
+      debugPrint('Error retrying job: $e');
+
+      final failedJob = ProcessingJob(
+        jobId: job.jobId,
+        status: JobStatus.failed,
+        createdAt: job.createdAt,
+        error: e.toString(),
+      );
+
+      final jobIndex = _jobs.indexWhere((j) => j.jobId == job.jobId);
+      if (jobIndex >= 0) _jobs[jobIndex] = failedJob;
+
+      await _databaseHelper.updateJobStatus(
+        job.jobId,
+        JobStatus.failed,
+        error: e.toString(),
+      );
+
+      notifyListeners();
+    }
+  }
+
   void _processJob(String jobId) {
     _latestJobId = jobId;
     _status = JobStatus.processing;
-    
-    // Add job to list
-    _jobs.add(ProcessingJob(
-      jobId: jobId,
-      status: JobStatus.processing,
-      createdAt: DateTime.now(),
-    ));
     notifyListeners();
-    
-    // Connect to WebSocket for status updates
     _connectToWebSocket(jobId);
   }
-  
+
   void _connectToWebSocket(String jobId) {
-    try {
-      // Close previous channel if exists
-      _channel?.sink.close();
-      
-      // Connect to WebSocket
-      // Use http://10.0.2.2:5000 for Android emulator to connect to localhost
-      final wsUrl = 'ws://10.0.2.2:5000/ws/status/$jobId';
-      _channel = WebSocketChannel.connect(Uri.parse(wsUrl));
-      
-      // Listen for status updates
-      _channel!.stream.listen(
-        (data) {
-          _handleStatusUpdate(jobId, data);
-        },
-        onError: (error) {
-          print('WebSocket error: $error');
-          _pollJobStatus(jobId);
-        },
-        onDone: () {
-          print('WebSocket connection closed');
-          _pollJobStatus(jobId);
-        },
-      );
-    } catch (e) {
-      print('WebSocket connection failed: $e');
-      _pollJobStatus(jobId);
-    }
+  try {
+    _channel?.sink.close();
+    _channel = IOWebSocketChannel.connect(
+      Uri.parse('ws://localhost:5000/ws/jobs'),
+      protocols: ['socket.io'],
+    );
+
+    _channel?.stream.listen(
+      (data) {
+        try {
+          final message = jsonDecode(data);
+          debugPrint('WebSocket message: $message');
+          
+          if (message['event'] == 'job_received') {
+            // Handle initial receipt confirmation
+            debugPrint('Server received image: ${message['data']['message']}');
+            _handleStatusUpdate(jobId, {
+              'status': 'received',
+              'message': message['data']['message']
+            });
+          }
+          else if (message['event'] == 'status_update') {
+            _handleStatusUpdate(jobId, message['data']);
+          }
+        } catch (e) {
+          debugPrint('WebSocket message error: $e');
+        }
+      },
+      onError: (err) {
+        debugPrint('WebSocket error: $err');
+        _pollJobStatus(jobId);
+      },
+      onDone: () {
+        debugPrint('WebSocket closed');
+        _pollJobStatus(jobId);
+      },
+    );
+
+    // Send subscription message
+    _channel?.sink.add(jsonEncode({
+      'type': 'subscribe',
+      'job_id': jobId,
+    }));
+
+  } catch (e) {
+    debugPrint('WebSocket connection failed: $e');
+    _pollJobStatus(jobId);
   }
-  
-  // Fallback to polling if WebSocket fails
+}
+
   void _pollJobStatus(String jobId) async {
     try {
-      while (true) {
-        // Find the job in the list
-        final jobIndex = _jobs.indexWhere((job) => job.jobId == jobId);
-        if (jobIndex < 0) return;
-        
-        // Skip polling if job is already completed or failed
-        if (_jobs[jobIndex].status == JobStatus.completed || 
-            _jobs[jobIndex].status == JobStatus.failed) {
-          return;
-        }
-        
-        // Poll the status endpoint
+      while (_jobs.any((j) => j.jobId == jobId && !j.isComplete)) {
         final status = await _apiService.checkJobStatus(jobId);
         _handleStatusUpdate(jobId, status);
-        
-        // Wait before polling again
         await Future.delayed(const Duration(seconds: 2));
       }
     } catch (e) {
-      print('Polling error: $e');
+      debugPrint('Polling error: $e');
     }
   }
-  
-  void _handleStatusUpdate(String jobId, dynamic data) {
-    // Parse the status from the received data
-    final newStatus = _parseStatusFromString(data.toString());
-    
-    // Find the job in the list
-    final jobIndex = _jobs.indexWhere((job) => job.jobId == jobId);
-    if (jobIndex < 0) return;
-    
-    // Create updated job with new status
-    final resultUrl = newStatus == JobStatus.completed 
-        ? 'http://10.0.2.2:5000/result/$jobId' 
-        : null;
-        
-    final updatedJob = ProcessingJob(
-      jobId: jobId,
-      status: newStatus,
-      resultUrl: resultUrl,
-      createdAt: _jobs[jobIndex].createdAt,
-      error: newStatus == JobStatus.failed ? "Job failed" : null,
-    );
-    
-    // Update the job in the list
-    _jobs[jobIndex] = updatedJob;
-    
-    // Update current status if this is the latest job
-    if (jobId == _latestJobId) {
-      _status = newStatus;
+Future<void> cleanupCompletedBatches() async {
+  try {
+    // Get all batch IDs with completed jobs
+    final completedBatches = _batches.keys.where((batchId) {
+      final batchJobs = _jobs.where((j) => j.batchId == batchId).toList();
+      return batchJobs.every((j) => j.status == JobStatus.completed);
+    }).toList();
+
+    // Remove completed batches
+    for (final batchId in completedBatches) {
+      _batches.remove(batchId);
     }
-    
+
     notifyListeners();
+  } catch (e) {
+    debugPrint('Error cleaning up batches: $e');
   }
-  
+}
+  void _handleStatusUpdate(String jobId, dynamic data) {
+  WidgetsBinding.instance.addPostFrameCallback((_) async {
+    try {
+      final newStatus = _parseStatusFromString(data['status'].toString());
+      final jobIndex = _jobs.indexWhere((j) => j.jobId == jobId);
+      
+      if (jobIndex == -1) return;
+
+      final updatedJob = _jobs[jobIndex].copyWith(
+        status: newStatus,
+        resultUrl: newStatus == JobStatus.completed 
+          ? '$baseUrl/result/$jobId' 
+          : null,
+        error: data['error']?.toString(),
+        message: data['message']?.toString(), // Add this line
+      );
+
+      _jobs[jobIndex] = updatedJob;
+      await _databaseHelper.updateJobStatus(
+        jobId,
+        newStatus,
+        resultUrl: updatedJob.resultUrl,
+        error: updatedJob.error,
+      );
+
+      notifyListeners();
+
+      // Add debug prints to track status
+      debugPrint('Job $jobId status updated to: $newStatus');
+      if (data['message'] != null) {
+        debugPrint('Message: ${data['message']}');
+      }
+
+    } catch (e) {
+      debugPrint('Error handling status update: $e');
+    }
+  });
+}
+
   JobStatus _parseStatusFromString(String status) {
     switch (status.toLowerCase()) {
       case 'done':
@@ -162,15 +308,39 @@ class JobProvider with ChangeNotifier {
       case 'failed':
       case 'error':
         return JobStatus.failed;
-      case 'processing':
-        return JobStatus.processing;
       case 'uploading':
         return JobStatus.uploading;
       default:
         return JobStatus.processing;
     }
   }
-  
+
+  Future<void> deleteJob(String jobId) async {
+    try {
+      _jobs.removeWhere((j) => j.jobId == jobId);
+      await _databaseHelper.deleteJob(jobId);
+      if (_latestJobId == jobId) {
+        _latestJobId = null;
+        _status = JobStatus.idle;
+      }
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error deleting job: $e');
+    }
+  }
+
+  Future<void> clearAllJobs() async {
+    try {
+      _jobs.clear();
+      await _databaseHelper.clearAllJobs();
+      _latestJobId = null;
+      _status = JobStatus.idle;
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Error clearing jobs: $e');
+    }
+  }
+
   @override
   void dispose() {
     _channel?.sink.close();

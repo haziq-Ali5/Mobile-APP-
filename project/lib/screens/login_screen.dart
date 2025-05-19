@@ -34,7 +34,7 @@ class _LoginScreenState extends State<LoginScreen> {
 
       if (!mounted) return;
 
-      Navigator.pushReplacementNamed(context, '/home');
+      Navigator.pushNamed(context, '/main');
     } catch (e) {
       if (!mounted) return;
 

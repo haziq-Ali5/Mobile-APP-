@@ -3,7 +3,6 @@ import 'package:flutter/material.dart';
 import 'package:project/providers/auth_provider.dart';
 import 'package:project/providers/job_provider.dart';
 import 'package:project/screens/home_screen.dart';
-import 'package:project/screens/result_screen.dart';
 import 'package:project/screens/welcome_screen.dart';
 import 'package:project/services/auth_service.dart';
 import 'package:project/services/api_service.dart';
@@ -12,10 +11,16 @@ import 'package:provider/provider.dart';
 import 'firebase_options.dart';
 import 'package:project/screens/login_screen.dart';
 import 'package:project/screens/register_screen.dart';
+import 'package:project/screens/main_navigator.dart';
+import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:sqflite_common_ffi_web/sqflite_ffi_web.dart';
+import 'package:sqflite/sqflite.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
-  
+  if (kIsWeb) {
+    databaseFactory = databaseFactoryFfiWeb;
+  }
   // Add error handling for Firebase initialization
   try {
     await Firebase.initializeApp(
@@ -37,7 +42,7 @@ void main() async {
         ),
         ChangeNotifierProvider(
           create: (context) => JobProvider(
-            ApiService(StorageService()),
+            ApiService(),
           ),
         ),
       ],
@@ -60,13 +65,20 @@ class MyApp extends StatelessWidget {
         '/home': (_) => HomeScreen(),
         '/register': (_) => RegisterScreen(),
         '/login': (_) => LoginScreen(),
-        '/result': (context) {
-          final jobId = ModalRoute.of(context)?.settings.arguments as String?;  // Retrieve jobId from route arguments
-          if (jobId == null) {
-            return const Scaffold(body: Center(child: Text('Job ID is missing')));
-          }
-          return ResultScreen(jobId: jobId);  // Pass the jobId to ResultScreen
-        },
+        '/main': (context) {
+  return MainNavigator();
+},
+         '/result': (context) {
+    final routeArgs = ModalRoute.of(context)?.settings.arguments;
+    if (routeArgs is! String) {
+      return const Scaffold(body: Center(child: Text('Invalid job ID')));
+    }
+    
+    final jobProvider = Provider.of<JobProvider>(context, listen: false);
+    jobProvider.loadJobs();
+    
+    return MainNavigator();
+  },
       },
     );
   }
