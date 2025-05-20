@@ -9,7 +9,7 @@ class CustomScarffold extends StatelessWidget {
     return Scaffold(
       appBar: AppBar(
         iconTheme: const IconThemeData(
-          color: Colors.white, // Change the color of the back button
+          color: Colors.blue, // Change the color of the back button
         ),
         backgroundColor: Colors.transparent,
         elevation: 0,

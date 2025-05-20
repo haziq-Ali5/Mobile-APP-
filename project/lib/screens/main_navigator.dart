@@ -23,7 +23,10 @@ class _MainNavigatorState extends State<MainNavigator> {
     return Scaffold(
       body: _screens[_selectedIndex],
       bottomNavigationBar: BottomNavigationBar(
+        backgroundColor: Colors.lightBlue,
         currentIndex: _selectedIndex,
+         selectedItemColor: Colors.black, // Active color
+        unselectedItemColor: Colors.white,
         onTap: (index) => setState(() => _selectedIndex = index),
         items: const [
           BottomNavigationBarItem(

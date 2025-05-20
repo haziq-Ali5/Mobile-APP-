@@ -3,15 +3,12 @@ import 'dart:io';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:http/http.dart' as http;
-import 'package:uuid/uuid.dart';
 import 'package:http_parser/http_parser.dart';
+import 'package:path_provider/path_provider.dart';
 
 class ApiService {
-  // Base URL for the API
-  // Use 10.0.2.2 for Android emulator to connect to localhost
   final String baseUrl = 'http://localhost:5000';
   
-  // API endpoints
   final String uploadEndpoint = '/jobs';
   final String statusEndpoint = '/status';
   final String resultEndpoint = '/result';
@@ -32,13 +29,15 @@ class ApiService {
         );
       }
 
-      final response = await http.Response.fromStream(await request.send());
+      final response = await request.send();
       
       if (response.statusCode == 200) {
-        final List<dynamic> responseData = json.decode(response.body);
-        return responseData.map<String>((j) => j['job_id'].toString()).toList();
+        final responseBody = await response.stream.bytesToString();
+        final List<dynamic> data = jsonDecode(responseBody) as List;
+        
+        return data.map<String>((j) => j['job_id'].toString()).toList();
       } else {
-        throw Exception('Upload failed: ${response.body}');
+        throw Exception('Upload failed: ${response.statusCode}');
       }
     } catch (e) {
       debugPrint('Upload error: $e');
@@ -46,14 +45,12 @@ class ApiService {
     }
   }
 
-  // Deprecated single-image methods
   Future<String> uploadImage(File image) async => 
       (await uploadFiles([await image.readAsBytes()])).first;
 
   Future<String> uploadImageBytes(Uint8List bytes) async => 
       (await uploadFiles([bytes])).first;
 
-  // Check job status
   Future<String> checkJobStatus(String jobId) async {
     try {
       final response = await http.get(Uri.parse('$baseUrl$statusEndpoint/$jobId'));
@@ -70,7 +67,6 @@ class ApiService {
     }
   }
 
-  // Get all enhanced images for a job (renamed to match what you're calling)
   Future<List<Uint8List>> getEnhancedImages(String jobId) async {
     try {
       final response = await http.get(Uri.parse('$baseUrl$resultEndpoint/$jobId/all'));
@@ -87,7 +83,6 @@ class ApiService {
     }
   }
 
-  // Get a single enhanced image (optional, for legacy calls)
   Future<Uint8List> getEnhancedImage(String jobId) async {
     try {
       final response = await http.get(Uri.parse('$baseUrl$resultEndpoint/$jobId'));
@@ -103,15 +98,22 @@ class ApiService {
     }
   }
 
-  // Generate fake job ID (for testing)
-  String generateFakeJobId() {
-    const uuid = Uuid();
-    return uuid.v4();
-  }
-
-  // Simulate job completion
   Future<void> simulateJobCompletion(String jobId) async {
     await Future.delayed(const Duration(seconds: 3));
     return;
+  }
+
+  /// New method to save a Uint8List image locally and return the saved path
+  Future<String> saveImageLocally(Uint8List imageBytes, String fileName) async {
+    try {
+      final directory = await getApplicationDocumentsDirectory();
+      final filePath = '${directory.path}/$fileName';
+      final file = File(filePath);
+      await file.writeAsBytes(imageBytes);
+      return filePath;
+    } catch (e) {
+      debugPrint('Error saving image locally: $e');
+      throw Exception('Failed to save image locally: $e');
+    }
   }
 }

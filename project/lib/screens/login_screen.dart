@@ -49,7 +49,20 @@ class _LoginScreenState extends State<LoginScreen> {
       }
     }
   }
+  bool isValidEmail(String email) {
+  final emailRegex = RegExp(r'^[^@]+@[^@]+\.[^@]+');
+  return emailRegex.hasMatch(email);
+}
 
+String? validatePassword(String? value) {
+  if (value == null || value.isEmpty) return 'Please enter Password';
+  if (value.length < 8) return 'Password must be at least 8 characters';
+  if (!RegExp(r'[A-Za-z]').hasMatch(value)) return 'Password must contain a letter';
+  if (!RegExp(r'\d').hasMatch(value)) return 'Password must contain a digit';
+  if (!RegExp(r'[!@#$%^&*(),.?":{}|<>]').hasMatch(value)) {
+    return 'Password must contain a special character';
+  }
+  return null;}
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -113,7 +126,8 @@ class _LoginScreenState extends State<LoginScreen> {
                         validator: (value) {
                           if (value == null || value.isEmpty) {
                             return 'Please enter Email';
-                          }
+                            
+                          }if (!isValidEmail(value)) return 'Please enter a valid email';
                           return null;
                         },
                         decoration: InputDecoration(
@@ -143,12 +157,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         controller: _passwordController,
                         obscureText: true,
                         obscuringCharacter: '*',
-                        validator: (value) {
-                          if (value == null || value.isEmpty) {
-                            return 'Please enter Password';
-                          }
-                          return null;
-                        },
+                        validator:  validatePassword,
                         decoration: InputDecoration(
                           label: const Text('Password'),
                           hintText: 'Enter Password',
@@ -177,6 +186,7 @@ class _LoginScreenState extends State<LoginScreen> {
                         child: ElevatedButton(
                           onPressed: _isLoading ? null : _handleLogin,
                           style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
                             padding: const EdgeInsets.symmetric(vertical: 15),
                             shape: RoundedRectangleBorder(
                               borderRadius: BorderRadius.circular(10),

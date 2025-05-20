@@ -21,8 +21,8 @@ class JobsNamespace(Namespace):
         super().__init__(namespace)
         self.active_monitors = {}
     def on_connect(self):
-        emit('connection_response', {'status': 'connected'})
-    def on_status_subscribe(self, data):
+        self.emit('connection_response', {'status': 'connected'})
+    def on_subscribe(self, data):
         job_id = data['job_id']
         sid = request.sid
     
@@ -31,35 +31,36 @@ class JobsNamespace(Namespace):
                 while self.active_monitors.get(sid, {}).get('active', False):
                     upload_path = os.path.join(current_app.config['UPLOAD_DIR'], f"{job_id}.png")
                     if os.path.exists(upload_path):
-                        emit('status_update', {
+                        self.emit('status_update', {
                             'job_id': job_id,
                             'status': 'received',
-                            'message': 'Image received and processing started'
-                        })
+                            'message': 'Image received and processing started',
+                     },room=sid,
+                     namespace='/ws/jobs')
                     for ext in ['.png', '.jpg', '.jpeg']:
-                        result_path = os.path.join(current_app.config['RESULT_DIR'], f"{job_id}.png")
+                        result_path = os.path.join(current_app.config['RESULT_DIR'], f"{job_id}{ext}")
                         if os.path.exists(result_path):
-                            emit('status_update', {
+                            self.emit('status_update', {
                                 'job_id': job_id,
                                 'status': 'completed',
-                                'result_url': f"/result/{job_id}"
-                            })
+                                'result_url': f"/result/{job_id}",    
+                            },room=sid,
+                     namespace='/ws/jobs')
                             return
                     
                         eventlet.sleep(2)
                     
             except Exception as e:
                 current_app.logger.error(f"Status monitor error: {e}")
-                emit('status_update', {
+                self.emit('status_update', {
                     'job_id': job_id,
                     'status': 'failed',
                     'error': str(e)
-                })
+                }, room=sid)
 
         self.active_monitors[sid] = {'active': True}
         eventlet.spawn(status_check)
-    def on_disconnect(self):
-        sid = request.sid
+    def on_disconnect(self,sid):
         if sid in self.active_monitors:
             self.active_monitors[sid]['active'] = False
             del self.active_monitors[sid]
@@ -120,11 +121,7 @@ def submit_job():
                 "status": "received",
                 "message": "Image received successfully"
             })
-            
-            socketio.emit('job_received', {
-                'job_id': job_id,
-                'message': 'Processing started'
-            }, namespace='/ws/jobs')
+
             
         except Exception as e:
             current_app.logger.error(f"Error processing file: {str(e)}")

@@ -13,6 +13,21 @@ class _RegisterScreenState extends State<RegisterScreen> {
   final _emailController = TextEditingController();
   final _passwordController = TextEditingController();
   final _formKey = GlobalKey<FormState>();
+  bool isValidEmail(String email) {
+  final emailRegex = RegExp(r'^[^@]+@[^@]+\.[^@]+');
+  return emailRegex.hasMatch(email);
+}
+
+String? validatePassword(String? value) {
+  if (value == null || value.isEmpty) return 'Please enter Password';
+  if (value.length < 8) return 'Password must be at least 8 characters';
+  if (!RegExp(r'[A-Za-z]').hasMatch(value)) return 'Password must contain a letter';
+  if (!RegExp(r'\d').hasMatch(value)) return 'Password must contain a digit';
+  if (!RegExp(r'[!@#$%^&*(),.?":{}|<>]').hasMatch(value)) {
+    return 'Password must contain a special character';
+  }
+  return null;
+}
 
   @override
   Widget build(BuildContext context) {
@@ -53,13 +68,14 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         validator: (value) {
                           if (value == null || value.isEmpty) {
                             return 'Please enter Email';
-                          }
+                          }if (!isValidEmail(value)) return 'Please enter a valid email';
                           return null;
                         },
                         decoration: InputDecoration(
                           label: const Text('Email'),
                           hintText: 'Enter Email',
                           hintStyle: const TextStyle(color: Colors.black26),
+                          
                           border: OutlineInputBorder(
                             borderRadius: BorderRadius.circular(10),
                           ),
@@ -73,12 +89,7 @@ class _RegisterScreenState extends State<RegisterScreen> {
                         controller: _passwordController,
                         obscureText: true,
                         obscuringCharacter: '*',
-                        validator: (value) {
-                          if (value == null || value.isEmpty) {
-                            return 'Please enter Password';
-                          }
-                          return null;
-                        },
+                        validator:validatePassword,
                         decoration: InputDecoration(
                           label: const Text('Password'),
                           hintText: 'Enter Password',
@@ -95,6 +106,12 @@ class _RegisterScreenState extends State<RegisterScreen> {
                       SizedBox(
                         width: double.infinity,
                         child: ElevatedButton(
+                          style: ElevatedButton.styleFrom(
+                            backgroundColor: Colors.blue,
+                            shape: RoundedRectangleBorder(
+                              borderRadius: BorderRadius.circular(10),
+                            ),
+                          ),
                           onPressed: () async {
                             if (_formKey.currentState!.validate()) {
                               try {

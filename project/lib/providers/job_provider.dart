@@ -1,30 +1,37 @@
+// lib/providers/job_provider.dart
+
 import 'package:uuid/uuid.dart';
 import 'dart:typed_data';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/widgets.dart';
 import 'package:project/constants/enums.dart';
 import 'package:project/models/job.dart';
+import 'package:project/models/processing_job_hive.dart';
 import 'package:project/services/api_service.dart';
-import 'package:project/services/database_helper.dart';
-import 'package:web_socket_channel/web_socket_channel.dart';
-import 'dart:convert';
-import 'package:web_socket_channel/io.dart';
+import 'package:project/services/hive_helper.dart';
+import 'package:socket_io_client/socket_io_client.dart' as IO;
 
 class JobProvider with ChangeNotifier {
   final ApiService _apiService;
-  final DatabaseHelper _databaseHelper = DatabaseHelper();
+  final HiveHelper _hiveHelper = HiveHelper();
   final Uuid _uuid = Uuid();
+
+  String _userId = '';
   JobStatus _status = JobStatus.idle;
   final List<ProcessingJob> _jobs = [];
-  WebSocketChannel? _channel;
+  IO.Socket? _socket;
   String? _latestJobId;
   static const String baseUrl = 'http://localhost:5000';
   final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
   String? _currentBatchId;
-  final Map<String, List<String>> _batches = {}; // batchId -> List<jobId>
+  final Map<String, List<String>> _batches = {};
 
   JobProvider(this._apiService);
+
+  void setUserId(String id) {
+    _userId = id;
+  }
 
   JobStatus get status => _status;
   List<ProcessingJob> get jobs => List.unmodifiable(_jobs);
@@ -38,67 +45,87 @@ class JobProvider with ChangeNotifier {
   }
 
   double getBatchProgress(String batchId) {
-    final jobs = _jobs.where((j) => j.batchId == batchId).toList();
-    if (jobs.isEmpty) return 0.0;
-    final completedCount = jobs.where((j) => j.status == JobStatus.completed).length;
-    return completedCount / jobs.length;
+    final jobsInBatch = _jobs.where((j) => j.batchId == batchId).toList();
+    if (jobsInBatch.isEmpty) return 0.0;
+    final completedCount = jobsInBatch.where((j) => j.status == JobStatus.completed).length;
+    return completedCount / jobsInBatch.length;
   }
 
   Future<void> loadJobs() async {
     try {
-      final savedJobs = await _databaseHelper.getAllJobs();
+      final hiveJobs = _hiveHelper.getAllJobs();
       _jobs
         ..clear()
-        ..addAll(savedJobs);
+        ..addAll(hiveJobs.map((hiveJob) => _fromHive(hiveJob)));
       notifyListeners();
     } catch (e) {
-      debugPrint('Error loading jobs: $e');
+      debugPrint('Error loading jobs from Hive: $e');
     }
   }
 
-  /// Upload multiple files in a batch.
   Future<List<String>> uploadFiles(List<Uint8List> files) async {
-  try {
-    _status = JobStatus.uploading;
-    notifyListeners();
+    try {
+      _status = JobStatus.uploading;
+      notifyListeners();
 
-    startNewBatch();  // Always start a new batch
+      startNewBatch();
 
-    // API call returns list of job IDs for the batch
-    final jobIds = await _apiService.uploadFiles(files);
-    debugPrint('Uploaded files, received job IDs: $jobIds');
-    _batches[_currentBatchId!] = jobIds;
+      final jobIds = await _apiService.uploadFiles(files);
+      debugPrint('Uploaded files, received job IDs: $jobIds');
+      _batches[_currentBatchId!] = jobIds;
 
-    for (final jobId in jobIds) {
-      final job = ProcessingJob(
-        jobId: jobId,
-        status: JobStatus.processing,
-        createdAt: DateTime.now(),
-        batchId: _currentBatchId,
-      );
-      await _databaseHelper.saveJob(job);
-      _jobs.add(job);
-      _processJob(jobId);
-    }
+      for (final jobId in jobIds) {
+        debugPrint("Job ID: $jobId");
+        final now = DateTime.now();
 
-    _status = JobStatus.processing;
-    notifyListeners();
+        final jobModel = ProcessingJob(
+          jobId: jobId,
+          userId: _userId,
+          status: JobStatus.processing,
+          createdAt: now,
+          batchId: _currentBatchId,
+          resultUrl: null,
+          error: null,
+          message: null,
+          localImagePath: null,
+          resultImage: null,
+        );
 
-    // Return the first jobId in the list (assuming there is at least one)
-    if (jobIds.isNotEmpty) {
+        final hiveJob = ProcessingJobHive(
+          jobId: jobId,
+          userId: _userId,
+          status: JobStatus.processing,
+          createdAtMillis: now.millisecondsSinceEpoch,
+          resultUrl: null,
+          localImagePath: null,
+          error: null,
+          batchId: _currentBatchId,
+          message: null,
+          isComplete: false,
+          resultImage: null,
+        );
+
+        try {
+          await _hiveHelper.saveJob(hiveJob);
+        } catch (e) {
+          debugPrint("Failed to save job to Hive: $e");
+        }
+
+        _jobs.add(jobModel);
+        _processJob(jobId);
+      }
+
+      _status = JobStatus.processing;
+      notifyListeners();
+
       return jobIds;
-    } else {
-      throw Exception('No job IDs returned from upload');
+    } catch (e) {
+      _status = JobStatus.failed;
+      notifyListeners();
+      rethrow;
     }
-  } catch (e) {
-    _status = JobStatus.failed;
-    notifyListeners();
-    rethrow;
   }
-}
 
-
-  /// Upload a single image (if needed)
   Future<void> uploadImageBytes(Uint8List imageBytes) async {
     try {
       _status = JobStatus.uploading;
@@ -106,16 +133,37 @@ class JobProvider with ChangeNotifier {
 
       startNewBatch();
       final jobId = await _apiService.uploadImageBytes(imageBytes);
+      final now = DateTime.now();
 
-      final job = ProcessingJob(
+      final jobModel = ProcessingJob(
         jobId: jobId,
+        userId: _userId,
         status: JobStatus.processing,
-        createdAt: DateTime.now(),
+        createdAt: now,
         batchId: _currentBatchId,
+        resultUrl: null,
+        error: null,
+        message: null,
+        localImagePath: null,
+        resultImage: null,
       );
-      await _databaseHelper.saveJob(job);
-      _jobs.add(job);
 
+      final hiveJob = ProcessingJobHive(
+        jobId: jobId,
+        userId: _userId,
+        status: JobStatus.processing,
+        createdAtMillis: now.millisecondsSinceEpoch,
+        resultUrl: null,
+        localImagePath: null,
+        error: null,
+        batchId: _currentBatchId,
+        message: null,
+        isComplete: false,
+        resultImage: null,
+      );
+      await _hiveHelper.saveJob(hiveJob);
+
+      _jobs.add(jobModel);
       _processJob(jobId);
 
       _status = JobStatus.processing;
@@ -127,175 +175,112 @@ class JobProvider with ChangeNotifier {
     }
   }
 
-  Future<void> retryJob(ProcessingJob job) async {
-    try {
-      final jobIndex = _jobs.indexWhere((j) => j.jobId == job.jobId);
-      final newJob = ProcessingJob(
-        jobId: job.jobId,
-        status: JobStatus.processing,
-        createdAt: job.createdAt,
-        batchId: job.batchId,
-      );
-
-      if (jobIndex >= 0) {
-        _jobs[jobIndex] = newJob;
-      } else {
-        _jobs.add(newJob);
-      }
-
-      await _databaseHelper.updateJobStatus(job.jobId, JobStatus.processing);
-
-      // Keep tracking this as latest if it's most recent
-      _latestJobId = job.jobId;
-      _status = JobStatus.processing;
-
-      notifyListeners();
-      _connectToWebSocket(job.jobId);
-    } catch (e) {
-      debugPrint('Error retrying job: $e');
-
-      final failedJob = ProcessingJob(
-        jobId: job.jobId,
-        status: JobStatus.failed,
-        createdAt: job.createdAt,
-        error: e.toString(),
-      );
-
-      final jobIndex = _jobs.indexWhere((j) => j.jobId == job.jobId);
-      if (jobIndex >= 0) _jobs[jobIndex] = failedJob;
-
-      await _databaseHelper.updateJobStatus(
-        job.jobId,
-        JobStatus.failed,
-        error: e.toString(),
-      );
-
-      notifyListeners();
-    }
-  }
-
   void _processJob(String jobId) {
     _latestJobId = jobId;
     _status = JobStatus.processing;
     notifyListeners();
-    _connectToWebSocket(jobId);
+    _connectToSocket(jobId);
   }
 
-  void _connectToWebSocket(String jobId) {
-  try {
-    _channel?.sink.close();
-    _channel = IOWebSocketChannel.connect(
-      Uri.parse('ws://localhost:5000/ws/jobs'),
-      protocols: ['socket.io'],
-    );
+  void _connectToSocket(String jobId) {
+    try {
+      _socket?.disconnect();
+      _socket = IO.io(
+        '$baseUrl/ws/jobs',
+        IO.OptionBuilder().setTransports(['websocket']).disableAutoConnect().enableForceNew().build(),
+      );
 
-    _channel?.stream.listen(
-      (data) {
-        try {
-          final message = jsonDecode(data);
-          debugPrint('WebSocket message: $message');
-          
-          if (message['event'] == 'job_received') {
-            // Handle initial receipt confirmation
-            debugPrint('Server received image: ${message['data']['message']}');
-            _handleStatusUpdate(jobId, {
-              'status': 'received',
-              'message': message['data']['message']
-            });
-          }
-          else if (message['event'] == 'status_update') {
-            _handleStatusUpdate(jobId, message['data']);
-          }
-        } catch (e) {
-          debugPrint('WebSocket message error: $e');
-        }
-      },
-      onError: (err) {
-        debugPrint('WebSocket error: $err');
+      _socket!.onConnect((_) {
+        debugPrint('Connected to Socket.IO');
+        _socket!.emit('subscribe', {'job_id': jobId});
+      });
+
+      _socket!.on('job_received', (data) {
+        _handleStatusUpdate(jobId, {
+          'status': 'received',
+          'message': data['message'],
+        });
+      });
+
+      _socket!.on('status_update', (data) {
+        _handleStatusUpdate(jobId, data);
+      });
+
+      _socket!.onError((err) {
         _pollJobStatus(jobId);
-      },
-      onDone: () {
-        debugPrint('WebSocket closed');
+      });
+
+      _socket!.onDisconnect((_) {
         _pollJobStatus(jobId);
-      },
-    );
+      });
 
-    // Send subscription message
-    _channel?.sink.add(jsonEncode({
-      'type': 'subscribe',
-      'job_id': jobId,
-    }));
-
-  } catch (e) {
-    debugPrint('WebSocket connection failed: $e');
-    _pollJobStatus(jobId);
+      _socket!.connect();
+    } catch (e) {
+      _pollJobStatus(jobId);
+    }
   }
-}
 
   void _pollJobStatus(String jobId) async {
     try {
       while (_jobs.any((j) => j.jobId == jobId && !j.isComplete)) {
-        final status = await _apiService.checkJobStatus(jobId);
-        _handleStatusUpdate(jobId, status);
+        final statusStr = await _apiService.checkJobStatus(jobId);
+        _handleStatusUpdate(jobId, {'status': statusStr});
         await Future.delayed(const Duration(seconds: 2));
       }
     } catch (e) {
       debugPrint('Polling error: $e');
     }
   }
-Future<void> cleanupCompletedBatches() async {
-  try {
-    // Get all batch IDs with completed jobs
-    final completedBatches = _batches.keys.where((batchId) {
-      final batchJobs = _jobs.where((j) => j.batchId == batchId).toList();
-      return batchJobs.every((j) => j.status == JobStatus.completed);
-    }).toList();
 
-    // Remove completed batches
-    for (final batchId in completedBatches) {
-      _batches.remove(batchId);
-    }
-
-    notifyListeners();
-  } catch (e) {
-    debugPrint('Error cleaning up batches: $e');
-  }
-}
   void _handleStatusUpdate(String jobId, dynamic data) {
-  WidgetsBinding.instance.addPostFrameCallback((_) async {
+  Future.microtask(() async {
     try {
       final newStatus = _parseStatusFromString(data['status'].toString());
       final jobIndex = _jobs.indexWhere((j) => j.jobId == jobId);
-      
       if (jobIndex == -1) return;
 
+      // Update in-memory ProcessingJob
       final updatedJob = _jobs[jobIndex].copyWith(
         status: newStatus,
-        resultUrl: newStatus == JobStatus.completed 
-          ? '$baseUrl/result/$jobId' 
-          : null,
+        resultUrl: newStatus == JobStatus.completed
+            ? '$baseUrl/result/$jobId'
+            : null,
         error: data['error']?.toString(),
-        message: data['message']?.toString(), // Add this line
+        message: data['message']?.toString(),
       );
 
       _jobs[jobIndex] = updatedJob;
-      await _databaseHelper.updateJobStatus(
-        jobId,
-        newStatus,
-        resultUrl: updatedJob.resultUrl,
-        error: updatedJob.error,
-      );
 
-      notifyListeners();
+      // Update Hive entry
+      final hiveJob = _hiveHelper.getJob(jobId);
+      if (hiveJob != null) {
+        final newHive = ProcessingJobHive(
+          jobId: hiveJob.jobId,
+          userId: hiveJob.userId,
+          status: newStatus,
+          createdAtMillis: hiveJob.createdAtMillis,
+          resultUrl: updatedJob.resultUrl,
+          localImagePath: updatedJob.localImagePath,
+          error: updatedJob.error,
+          batchId: hiveJob.batchId,
+          message: updatedJob.message,
+          isComplete: (newStatus == JobStatus.completed ||
+              newStatus == JobStatus.failed),
+          resultImage: updatedJob.resultImage,
+        );
+        await _hiveHelper.saveJob(newHive);
+      }
 
-      // Add debug prints to track status
-      debugPrint('Job $jobId status updated to: $newStatus');
+         WidgetsBinding.instance.addPostFrameCallback((_) {
+        notifyListeners();
+      });
+
+      debugPrint('Job $jobId updated to: $newStatus');
       if (data['message'] != null) {
         debugPrint('Message: ${data['message']}');
       }
-
     } catch (e) {
-      debugPrint('Error handling status update: $e');
+      debugPrint('Status update error: $e');
     }
   });
 }
@@ -315,35 +300,132 @@ Future<void> cleanupCompletedBatches() async {
     }
   }
 
+  Future<void> retryJob(ProcessingJob job) async {
+    try {
+      final jobIndex = _jobs.indexWhere((j) => j.jobId == job.jobId);
+      final now = job.createdAt;
+      final newJobModel = job.copyWith(
+        status: JobStatus.processing,
+        error: null,
+        message: null,
+        localImagePath: null,
+        resultImage: null,
+        resultUrl: null,
+      );
+
+      if (jobIndex >= 0) {
+        _jobs[jobIndex] = newJobModel;
+      } else {
+        _jobs.add(newJobModel);
+      }
+
+      final hiveJob = ProcessingJobHive(
+        jobId: job.jobId,
+        userId: job.userId,
+        status: JobStatus.processing,
+        createdAtMillis: now.millisecondsSinceEpoch,
+        resultUrl: null,
+        localImagePath: null,
+        error: null,
+        batchId: job.batchId,
+        message: null,
+        isComplete: false,
+        resultImage: null,
+      );
+      await _hiveHelper.saveJob(hiveJob);
+
+      _latestJobId = job.jobId;
+      _status = JobStatus.processing;
+      notifyListeners();
+
+      _connectToSocket(job.jobId);
+    } catch (e) {
+      final failedModel = job.copyWith(status: JobStatus.failed, error: e.toString());
+      final idx = _jobs.indexWhere((j) => j.jobId == job.jobId);
+      if (idx >= 0) _jobs[idx] = failedModel;
+
+      final oldHive = _hiveHelper.getJob(job.jobId);
+      if (oldHive != null) {
+        final failedHive = ProcessingJobHive(
+          jobId: oldHive.jobId,
+          userId: oldHive.userId,
+          status: JobStatus.failed,
+          createdAtMillis: oldHive.createdAtMillis,
+          resultUrl: oldHive.resultUrl,
+          localImagePath: oldHive.localImagePath,
+          error: e.toString(),
+          batchId: oldHive.batchId,
+          message: oldHive.message,
+          isComplete: true,
+          resultImage: oldHive.resultImage,
+        );
+        await _hiveHelper.saveJob(failedHive);
+      }
+
+      notifyListeners();
+    }
+  }
+
   Future<void> deleteJob(String jobId) async {
     try {
       _jobs.removeWhere((j) => j.jobId == jobId);
-      await _databaseHelper.deleteJob(jobId);
+      await _hiveHelper.deleteJob(jobId);
       if (_latestJobId == jobId) {
         _latestJobId = null;
         _status = JobStatus.idle;
       }
       notifyListeners();
     } catch (e) {
-      debugPrint('Error deleting job: $e');
+      debugPrint('Delete job error: $e');
     }
   }
 
   Future<void> clearAllJobs() async {
     try {
       _jobs.clear();
-      await _databaseHelper.clearAllJobs();
+      await _hiveHelper.clearAllJobs();
       _latestJobId = null;
       _status = JobStatus.idle;
       notifyListeners();
     } catch (e) {
-      debugPrint('Error clearing jobs: $e');
+      debugPrint('Clear jobs error: $e');
+    }
+  }
+
+  Future<void> cleanupCompletedBatches() async {
+    try {
+      final completedBatches = _batches.keys.where((batchId) {
+        final batchJobs = _jobs.where((j) => j.batchId == batchId).toList();
+        return batchJobs.every((j) => j.status == JobStatus.completed);
+      }).toList();
+
+      for (final batchId in completedBatches) {
+        _batches.remove(batchId);
+      }
+      notifyListeners();
+    } catch (e) {
+      debugPrint('Batch cleanup error: $e');
     }
   }
 
   @override
   void dispose() {
-    _channel?.sink.close();
+    _socket?.disconnect();
     super.dispose();
+  }
+
+  ProcessingJob _fromHive(ProcessingJobHive hive) {
+    return ProcessingJob(
+      jobId: hive.jobId,
+      userId: hive.userId,
+      status: hive.status,
+      createdAt: DateTime.fromMillisecondsSinceEpoch(hive.createdAtMillis),
+      resultUrl: hive.resultUrl,
+      localImagePath: hive.localImagePath,
+      error: hive.error,
+      batchId: hive.batchId,
+      message: hive.message,
+      resultImage: hive.resultImage,
+    );
   }
 }
