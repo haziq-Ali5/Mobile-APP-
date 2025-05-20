@@ -114,6 +114,4 @@ class ApiService {
     } catch (e) {
       debugPrint('Error saving image locally: $e');
       throw Exception('Failed to save image locally: $e');
-    }
-  }
-}
+    }}}

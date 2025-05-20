@@ -1,18 +1,15 @@
 from flask_socketio import Namespace, emit
+from flask import copy_current_request_context
 from app import socketio
-import time
-import threading
-from flask_socketio import disconnect
 from flask import current_app
-import eventlet
-from datetime import datetime
+
 import base64
-from firebase_admin import credentials, initialize_app, auth
+from firebase_admin import credentials, initialize_app
 import firebase_admin
 import os
 import subprocess
 import uuid
-from flask import Blueprint, request, jsonify, send_file, url_for
+from flask import Blueprint, request, jsonify, send_file
 jobs_bp = Blueprint('jobs', __name__)
 
 # Add WebSocket namespace
@@ -25,11 +22,18 @@ class JobsNamespace(Namespace):
     def on_subscribe(self, data):
         job_id = data['job_id']
         sid = request.sid
-    
+        self.emit('job_received', {
+    'job_id': job_id,
+    'message': f'Subscribed to job {job_id}'
+}, room=sid, namespace='/ws/jobs')
+        @copy_current_request_context
         def status_check():
             try:
+                print("status check started")
                 while self.active_monitors.get(sid, {}).get('active', False):
+                    print("Checking status...")
                     upload_path = os.path.join(current_app.config['UPLOAD_DIR'], f"{job_id}.png")
+                    print(f"Checking for upload at: {upload_path}")
                     if os.path.exists(upload_path):
                         self.emit('status_update', {
                             'job_id': job_id,
@@ -37,6 +41,7 @@ class JobsNamespace(Namespace):
                             'message': 'Image received and processing started',
                      },room=sid,
                      namespace='/ws/jobs')
+                        print("Image received and processing started")
                     for ext in ['.png', '.jpg', '.jpeg']:
                         result_path = os.path.join(current_app.config['RESULT_DIR'], f"{job_id}{ext}")
                         if os.path.exists(result_path):
@@ -46,9 +51,9 @@ class JobsNamespace(Namespace):
                                 'result_url': f"/result/{job_id}",    
                             },room=sid,
                      namespace='/ws/jobs')
+                            print("Result found")
                             return
                     
-                        eventlet.sleep(2)
                     
             except Exception as e:
                 current_app.logger.error(f"Status monitor error: {e}")
@@ -59,7 +64,7 @@ class JobsNamespace(Namespace):
                 }, room=sid)
 
         self.active_monitors[sid] = {'active': True}
-        eventlet.spawn(status_check)
+        socketio.start_background_task(status_check)
     def on_disconnect(self,sid):
         if sid in self.active_monitors:
             self.active_monitors[sid]['active'] = False
@@ -172,4 +177,4 @@ def ensure_dirs_exist():
         current_app.config['RESULT_DIR'] = os.path.join(current_app.instance_path, 'results')
     
     os.makedirs(current_app.config['UPLOAD_DIR'], exist_ok=True)
-    os.makedirs(current_app.config['RESULT_DIR'], exist_ok=True)
+    os.makedirs(current_app.config['RESULT_DIR'], exist_ok=True)    

@@ -10,7 +10,7 @@ socketio = SocketIO(
     cors_allowed_origins="*",
     async_mode='gevent',  
     logger=True,
-    engineio_logger=True
+    engineio_logger=False
 )
 jwt = JWTManager()
 
@@ -46,6 +46,6 @@ def create_app():
 
     # Register SocketIO namespace - FIXED THIS LINE
     from .routes.jobs import jobs_namespace
-    socketio.on_namespace(jobs_namespace)  # Remove the parentheses and namespace path
-    
+    socketio.on_namespace   (jobs_namespace)
+    # Register error handlers
     return app

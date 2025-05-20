@@ -7,6 +7,8 @@ import 'package:flutter/material.dart';
 import 'package:gallery_saver/gallery_saver.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'dart:html' as html;
+import 'package:flutter/foundation.dart' show kIsWeb;
 
 class ResultScreen extends StatefulWidget {
   final String jobId;
@@ -66,6 +68,15 @@ class _ResultScreenState extends State<ResultScreen> {
   }
 
   Future<void> _saveImage(Uint8List imageBytes) async {
+    if (kIsWeb) {
+    // For Flutter Web
+    final blob = html.Blob([imageBytes]);
+    final url = html.Url.createObjectUrlFromBlob(blob);
+    final anchor = html.AnchorElement(href: url)
+      ..download="enhanced_image_${DateTime.now().millisecondsSinceEpoch}.png"
+      ..click();
+    html.Url.revokeObjectUrl(url);}
+    else{
     try {
       final tempDir = await getTemporaryDirectory();
       final tempPath =
@@ -102,6 +113,7 @@ class _ResultScreenState extends State<ResultScreen> {
       }
     }
   }
+    }
 
   void _onDownloadPressed() async {
     for (var img in _enhancedImages) {
